@@ -1,16 +1,22 @@
 """Tkinter GUI: one section per portfolio, manual refresh, threaded fetch.
 
 Custom grid-based table (replaces ttk.Treeview) so each row can host a
-Canvas for the 52-wk range bar. Click a column header to sort; click again
-to reverse. Table stretches to fill the window; the bar redraws at the
-column's actual pixel width whenever the window is resized.
+Canvas for the 52-wk range bar. Features:
+  - Click a column header to sort; click again to reverse.
+  - Table stretches to fill the window; the bar redraws at the column's
+    actual pixel width whenever the window is resized.
+  - Double-click any row to open ChatGPT in the default browser asking
+    why that stock is moving today (prompt also copied to the clipboard
+    as a fallback).
 """
 import datetime
 import re
 import threading
 import tkinter as tk
+import webbrowser
 from tkinter import ttk, messagebox
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 from auth import interactive_login
 from portfolio import fetch_all_portfolios, NotAuthenticatedError
@@ -91,7 +97,6 @@ def _draw_range_bar(canvas: tk.Canvas,
                     low: Optional[float],
                     high: Optional[float],
                     current: Optional[float]) -> None:
-    """Draw at the canvas's current actual width."""
     canvas.delete("all")
     W = max(int(canvas.winfo_width()), _BAR_MIN_WIDTH_PX)
     H = _BAR_HEIGHT_PX
@@ -139,9 +144,12 @@ class PortfolioApp:
         self.refresh_btn = tk.Button(toolbar, text="Refresh", width=10,
                                      command=self.on_refresh)
         self.refresh_btn.pack(side=tk.LEFT, padx=(6, 0))
-        self.status = tk.Label(toolbar,
-                               text="Click 'Log in to Yahoo' first, then Refresh.",
-                               anchor="w")
+        self.status = tk.Label(
+            toolbar,
+            text="Click 'Log in to Yahoo' first, then Refresh. "
+                 "Double-click any row to ask ChatGPT about that stock.",
+            anchor="w",
+        )
         self.status.pack(side=tk.LEFT, padx=10)
 
         outer = tk.Frame(root)
@@ -153,9 +161,9 @@ class PortfolioApp:
         self.canvas.configure(yscrollcommand=scrollbar.set)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self._content_window = self.canvas.create_window((0, 0),
-                                                         window=self.content,
-                                                         anchor="nw")
+        self._content_window = self.canvas.create_window(
+            (0, 0), window=self.content, anchor="nw"
+        )
 
         self.content.bind(
             "<Configure>",
@@ -177,6 +185,26 @@ class PortfolioApp:
         state = tk.DISABLED if busy else tk.NORMAL
         self.refresh_btn.config(state=state)
         self.login_btn.config(state=state)
+
+    # --- Double-click handler: ask ChatGPT about a stock ---
+    def _open_chatgpt_for_symbol(self, symbol: str) -> None:
+        sym = (symbol or "").strip()
+        if not sym:
+            return
+        prompt = (f"Why is {sym} stock moving today? "
+                  f"What recent news or events might explain the price action?")
+        # Copy to clipboard as a fallback.
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(prompt)
+        except Exception:
+            pass
+        # ChatGPT honors ?q= as a pre-filled, auto-submitted prompt.
+        url = f"https://chatgpt.com/?q={quote(prompt)}"
+        webbrowser.open(url)
+        self.status.config(
+            text=f"Asked ChatGPT about {sym}. Prompt also copied to clipboard."
+        )
 
     # --- Login ---
     def on_login(self):
@@ -230,7 +258,7 @@ class PortfolioApp:
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.status.config(
             text=f"Loaded {len(portfolios)} portfolio(s), {total} holding(s) "
-                 f"· Fetched: {ts}"
+                 f"· Fetched: {ts}  ·  Double-click a row to ask ChatGPT."
         )
         self._set_busy(False)
 
@@ -270,11 +298,9 @@ class PortfolioApp:
             tk.Label(section, text="(no holdings)", fg="#777", anchor="w").pack(fill=tk.X)
             return
 
-        # Stretches with the window.
         table = tk.Frame(section)
         table.pack(fill=tk.X, expand=True)
 
-        # Column weights -- bar gets more share, but every column flexes.
         for c_idx, (_, _, min_w, _, kind, weight) in enumerate(_COLS):
             minsize = _BAR_MIN_WIDTH_PX if kind == "bar" else max(min_w * 8, 70)
             table.grid_columnconfigure(c_idx, weight=weight, minsize=minsize)
@@ -305,23 +331,25 @@ class PortfolioApp:
             # Data rows
             for r_idx, h in enumerate(holdings, start=1):
                 bg = "#ffffff" if r_idx % 2 else "#fafafa"
+                sym = (h.get("symbol") or "").strip()
+                dbl_handler = (lambda e, s=sym: self._open_chatgpt_for_symbol(s))
                 for c_idx, (key, label, min_w, anchor, kind, _w) in enumerate(_COLS):
                     if kind == "bar":
                         cv = tk.Canvas(
                             table,
                             height=_BAR_HEIGHT_PX,
                             highlightthickness=0, bg=bg,
+                            cursor="hand2",
                         )
                         low = h.get("range_low")
                         high = h.get("range_high")
                         cur = _parse_price(h.get("last_price", ""))
-                        # Redraw whenever the canvas is resized (including
-                        # the first layout pass).
                         def make_redraw(cv_ref, lo, hi, p):
                             def _redraw(event=None):
                                 _draw_range_bar(cv_ref, lo, hi, p)
                             return _redraw
                         cv.bind("<Configure>", make_redraw(cv, low, high, cur))
+                        cv.bind("<Double-Button-1>", dbl_handler)
                         cv.grid(row=r_idx, column=c_idx, sticky="ew", padx=0)
                     else:
                         val = str(h.get(key, ""))
@@ -334,7 +362,8 @@ class PortfolioApp:
                                 fg = "#b40000"
                         lbl = tk.Label(table, text=val, anchor=anchor,
                                        font=("Segoe UI", 9), fg=fg, bg=bg,
-                                       padx=4, pady=2)
+                                       padx=4, pady=2, cursor="hand2")
+                        lbl.bind("<Double-Button-1>", dbl_handler)
                         lbl.grid(row=r_idx, column=c_idx, sticky="ew")
 
         def sort_by(col: str):
