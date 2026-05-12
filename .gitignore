@@ -1,0 +1,11 @@
+# Yahoo session cookies / login state -- never commit
+.yahoo_session/
+
+# Python artifacts
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local debug dumps
+last_page_dump.html
